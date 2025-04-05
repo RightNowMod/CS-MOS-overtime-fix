@@ -40,6 +40,7 @@ ConVar g_Cvar_mp_respawn_on_death_t;
 ConVar g_Cvar_mp_ignore_round_win_conditions;
 ConVar g_Cvar_mp_overtime_maxrounds;
 ConVar g_Cvar_mp_overtime_enable;
+ConVar g_Cvar_mp_halftime;
 char error[255];
 Database db;
 
@@ -69,6 +70,8 @@ public void OnPluginStart() {
     g_Cvar_mp_ignore_round_win_conditions = FindConVar("mp_ignore_round_win_conditions");
     g_Cvar_mp_overtime_maxrounds = FindConVar("mp_overtime_maxrounds"); // 加时赛最大轮数 默认6，目前没有开放调节
     g_Cvar_mp_overtime_enable = FindConVar("mp_overtime_enable"); // 是否允许加时赛
+    g_Cvar_mp_halftime = FindConVar("mp_halftime"); // 是否启用半场切换
+    
 
     // 初始化击杀数
     for (int i = 1; i <= MaxClients; i++) {
@@ -168,7 +171,7 @@ public void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast) {
         g_TotalRounds++;
         PrintToServer("[RoundEnd] 总共已经进行了%d轮比赛！总共%d轮", g_TotalRounds, g_Cvar_maxRounds.IntValue);
 
-        if (g_TotalRounds >= (g_Cvar_maxRounds.IntValue / 2)) { // 半场切换准备 交换双方数据
+        if (g_TotalRounds >= (g_Cvar_maxRounds.IntValue / 2) && g_Cvar_mp_halftime.IntValue == 1) { // 半场切换准备 交换双方数据
             if (!isHalfTimeTriggered) {
                 isHalfTimeTriggered = true;
                 int ct_tmp = g_ctWinRounds;
@@ -194,7 +197,7 @@ public void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast) {
             if (!g_isInOverTime && g_ctWinRounds == g_tWinRounds) {
                 g_isInOverTime = true; // 符合加时赛的条件，设置从下轮开始为加时赛
             } else { // 加时赛的情况
-                if ((g_ctOvertimeWinRounds + g_tOvertimeWinRounds) >= (g_Cvar_mp_overtime_maxrounds.IntValue / 2)) { // 半场切换
+                if ((g_ctOvertimeWinRounds + g_tOvertimeWinRounds) >= (g_Cvar_mp_overtime_maxrounds.IntValue / 2) && g_Cvar_mp_halftime.IntValue == 1) { // 半场切换
                     if (!isOverTimeHalfTimeTriggered) {
                         isOverTimeHalfTimeTriggered = true;
                         int ct_tmp = g_ctOvertimeWinRounds;
