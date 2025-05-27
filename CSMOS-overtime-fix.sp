@@ -30,6 +30,8 @@ int g_tWinRounds = 0; // T win rounds
 bool g_isInOverTime = false; // is currently overtime
 int g_ctOvertimeWinRounds = 0; // CT win rounds
 int g_tOvertimeWinRounds = 0; // T win rounds
+int overtime_count = 0; // 加时赛加时次数
+int phase = 1; // 当前比赛阶段
 
 bool isHalfTimeTriggered = false; // 是否触发半场切换
 bool isOverTimeHalfTimeTriggered = false; // 是否触发加时赛半场切换
@@ -47,11 +49,18 @@ Database db;
 Handle g_timer; // 设置定时器
 int g_remainingTime = RESTART_TIME;
 
+ConVar g_Cvar_cdk; // 自定义的cdk
+
 // 插件初始化
 public void OnPluginStart() {
     // 注册命令
     RegConsoleCmd("sm_weapons", Command_Weapons, "Open weapon selection menu");
     RegConsoleCmd("sm_rank", Command_Rank, "Show player rankings");
+
+    g_Cvar_cdk = CreateConVar("cdk", "null", "cdk for database", FCVAR_REPLICATED);
+    char cdk[64];
+    GetConVarString(g_Cvar_cdk, cdk, 64);
+    PrintToServer("cdk: %s", cdk);
 
     // 事件挂钩
     HookEvent("player_death", Event_PlayerDeath);
@@ -91,6 +100,11 @@ bool isCompetitiveMode() {
     return (g_Cvar_mp_respawn_on_death_ct.IntValue == 0 && g_Cvar_mp_respawn_on_death_t.IntValue == 0 && g_Cvar_mp_ignore_round_win_conditions.IntValue == 0);
 }
 
+bool isEliminationMode() {
+    return (g_Cvar_mp_respawn_on_death_ct.IntValue == 0 && g_Cvar_mp_respawn_on_death_t.IntValue == 0 && g_Cvar_mp_ignore_round_win_conditions.IntValue == 0);
+}
+
+
 /**
     初始化游戏局数
 **/
@@ -102,6 +116,8 @@ void ResetGameRounds() {
     g_TotalRounds = 0;
     g_ctWinRounds = 0;
     g_tWinRounds = 0;
+    overtime_count = 0;
+    phase = 1;
     isHalfTimeTriggered = false;
 }
 
@@ -132,7 +148,7 @@ public void Event_GameStart(Event event, const char[] name, bool dontBroadcast)
     int fragLimit = event.GetInt("fraglimit");
     char objective[64];
     event.GetString("objective", objective, sizeof(objective));
-
+    
     PrintToServer("Game Start Event Triggered!");
     PrintToServer("Max Rounds: %d", maxRounds);
     PrintToServer("Time Limit: %d", timeLimit);
@@ -145,6 +161,7 @@ public void Event_GameStart(Event event, const char[] name, bool dontBroadcast)
     一局结束事件 比CSS一局结束事件晚触发
 **/
 public void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast) {
+    
     int winner = event.GetInt("winner");
     if (winner == 2)
     {
@@ -166,6 +183,7 @@ public void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast) {
             g_ctOvertimeWinRounds++;
         }
     }
+    AddMatchRoundDB(winner);
 
     if (winner == 2 || winner == 3) {
         g_TotalRounds++;
@@ -179,23 +197,28 @@ public void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast) {
                 g_ctWinRounds = t_tmp;
                 g_tWinRounds = ct_tmp;
                 PrintToServer("[RoundEnd]半场切换");
+                PrintToChatAll("[RoundEnd]半场切换");
+                phase++; // 半场，阶段变更
             }
         }
 
         if (!g_isInOverTime && 
         (g_ctWinRounds > (g_Cvar_maxRounds.IntValue / 2) || g_tWinRounds > (g_Cvar_maxRounds.IntValue / 2))) { // 一方赢了
                 PrintToServer("[RoundEnd] 游戏结束！");
+                UpdateRoomInfoRoundsDB(); // 更新数据库轮数
                 RestartGame();
                 return;
         }
         if (g_TotalRounds >= g_Cvar_maxRounds.IntValue) {
             if (!isOverTimeEnabled()) { // 未开启加时赛
                 PrintToServer("[RoundEnd] 游戏结束！");
+                UpdateRoomInfoRoundsDB(); // 更新数据库轮数
                 RestartGame(); // 结束比赛
                 return;
             }
             if (!g_isInOverTime && g_ctWinRounds == g_tWinRounds) {
                 g_isInOverTime = true; // 符合加时赛的条件，设置从下轮开始为加时赛
+                phase++; // 进入加时赛，阶段变更
             } else { // 加时赛的情况
                 if ((g_ctOvertimeWinRounds + g_tOvertimeWinRounds) >= (g_Cvar_mp_overtime_maxrounds.IntValue / 2) && g_Cvar_mp_halftime.IntValue == 1) { // 半场切换
                     if (!isOverTimeHalfTimeTriggered) {
@@ -205,25 +228,44 @@ public void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast) {
                         g_ctOvertimeWinRounds = t_tmp;
                         g_tOvertimeWinRounds = ct_tmp;
                         PrintToServer("[RoundEnd]半场切换");
+                        PrintToChatAll("[RoundEnd]半场切换");
+                        phase++; // 半场，阶段变更
                     }
                 }
                 if (g_ctOvertimeWinRounds > (g_Cvar_mp_overtime_maxrounds.IntValue / 2) || g_tOvertimeWinRounds > (g_Cvar_mp_overtime_maxrounds.IntValue / 2)) {
                     // 加时赛分出胜负
                     PrintToServer("[RoundEnd] 游戏结束！");
+                    UpdateRoomInfoRoundsDB(); // 更新数据库轮数
                     RestartGame();
+                    // overtime_count++;
                     return;
                 }
                 if ((g_ctOvertimeWinRounds + g_tOvertimeWinRounds) >= g_Cvar_mp_overtime_maxrounds.IntValue) {
                     // 加时赛结束，没有分出胜负
                     ResetOvertimeRounds(true); // 重置加时赛
+                    overtime_count++;
+                    phase++; // 进入下一轮加时赛，阶段变更
                 }
             }
         }
+        
+        UpdateRoomInfoRoundsDB(); // 更新数据库轮数
+
     }
 }
 
 void RestartGame() {
+    for (int i = 1; i <= MaxClients; i++) {
+        if (IsValidClient(i)) {
+            showScoreBoard(i);
+        }
+    }
     PrintToServer("[游戏] 结束比赛，重新进入地图");
+    for(int i = 0; i < 10; i++) {
+        PrintToChatAll("[游戏] 比赛结束，重新进入地图");
+    }
+    ResetGameRounds();
+    ResetOvertimeRounds(false);
     InitReloadMap();
     g_timer = CreateTimer(1.0, ReloadMap, _, TIMER_REPEAT);
 }
@@ -257,6 +299,54 @@ public void OnMapStart()
     InitReloadMap();
     ResetOvertimeRounds(false);
     FormatTime(g_roomId, sizeof(g_roomId), "%Y%m%d%H%M%S", GetTime()); // generate room id
+    AddRoomInfoDB();
+}
+
+void AddRoomInfoDB() {
+    char map[64];
+    GetCurrentMap(map, sizeof(map));
+
+    char cdk[64];
+    GetConVarString(g_Cvar_cdk, cdk, 64);
+
+    char queryStr[512];
+    Format(queryStr, sizeof(queryStr),
+    "insert into room_info set room_id='%s', max_player='%d', actual_player='%d', map_name='%s', cdk='%s', create_time=NOW(), overtime_round_each_time='%d', is_overtime_enable='%d'",
+    g_roomId, MaxClients, 0, map, cdk, g_Cvar_mp_overtime_maxrounds.IntValue, g_Cvar_mp_overtime_enable.IntValue);
+    DbQuery(queryStr);
+}
+
+void UpdateRoomInfoDB() {
+    char map[64];
+    GetCurrentMap(map, sizeof(map));
+
+    char cdk[64]; // TODO: 读出来有时候，cdk后面还跟着一些奇奇怪怪的字符
+    cdk[0] = '\0';
+    GetConVarString(g_Cvar_cdk, cdk, sizeof(cdk));
+
+    char queryStr[512];
+    Format(queryStr, sizeof(queryStr),
+    "update room_info set cdk='%s' where room_id='%s', overtime_round_each_time='%d', is_overtime_enable='%d'",
+    cdk, g_roomId, g_Cvar_mp_overtime_maxrounds.IntValue, g_Cvar_mp_overtime_enable.IntValue);
+    DbQuery(queryStr);
+}
+
+/**
+*   更新局数状况
+**/
+void UpdateRoomInfoRoundsDB() {
+    char map[64];
+    GetCurrentMap(map, sizeof(map));
+
+    char cdk[64]; // TODO: 读出来有时候，cdk后面还跟着一些奇奇怪怪的字符
+    cdk[0] = '\0';
+    GetConVarString(g_Cvar_cdk, cdk, sizeof(cdk));
+
+    char queryStr[512];
+    Format(queryStr, sizeof(queryStr),
+    "update room_info set cdk='%s', ct_win_round='%d', t_win_round='%d', total_round='%d', overtime_count='%d', max_rounds='%d' where room_id='%s'",
+    cdk, g_ctWinRounds, g_tWinRounds, g_TotalRounds, overtime_count, g_Cvar_maxRounds.IntValue, g_roomId);
+    DbQuery(queryStr);
 }
 
 
@@ -270,6 +360,10 @@ public void OnMapEnd()
 public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast) {
     int client = GetClientOfUserId(event.GetInt("userid"));
     int attacker = GetClientOfUserId(event.GetInt("attacker"));
+    char name[32];
+    GetClientName(client, name, sizeof(name));
+    // PrintToServer("[游戏] 玩家 %s 出生！", name);
+	// PrintToChatAll("[游戏] 玩家 %s 出生！", name);
 }
 
 // 玩家死亡事件
@@ -284,26 +378,31 @@ public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast
     GetClientName(attacker, attackerName, sizeof(attackerName));
     char victimName[32];
     GetClientName(victim, victimName, sizeof(victimName));
+
     bool isValidKill = 1;
-    if (attacker == victim) { // self kill
-        isValidKill = 0;
-    }
     // 获取攻击者和受害者的队伍 2:ct, 3:t
     int attacker_team = GetClientTeam(attacker);
     int victim_team = GetClientTeam(victim);
 
-    // 判断某一方玩家是否全部离开
+    if (attacker == victim || attacker_team == victim_team) { // 自杀或被队友杀死
+        isValidKill = 0; // 不算击杀者的击杀数，但算受害者死亡数
+    } 
+
+    // 更新房间信息
+    UpdateRoomInfoDB();
+
+    // 判断某一方玩家是否全部离开 TODO 一般情况不用管（不在加时赛的情况）如果在加时赛是不会自动重置的
     
 
     // PrintToChatAll("attacker: %s, victim: %s, headshot: %d, weapon: %s", attackerName, victimName, headshot, weapon);
     // ("isValidKill: %d, attacker_team: %d, victim_team: %d", isValidKill, attacker_team, victim_team);
 
-    if (IsValidClient(attacker)) {
+    if (IsValidClient(attacker) && isCompetitiveMode()) {
         // insert to database
-        char queryStr[256];
+        char queryStr[512];
         Format(queryStr, sizeof(queryStr),
-        "INSERT INTO player_log SET room_id='%s', victim_name='%s', attacker_name='%s', headshot=%d, weapon='%s', valid_kill='%d', attacker_team='%d', victim_team='%d'",
-        g_roomId, attackerName, victimName, headshot, weapon, isValidKill, attacker_team, victim_team);
+        "INSERT INTO player_log SET room_id='%s', victim_name='%s', attacker_name='%s', headshot=%d, weapon='%s', valid_kill='%d', attacker_team='%d', victim_team='%d', round_num='%d', phase='%d'",
+        g_roomId, attackerName, victimName, headshot, weapon, isValidKill, attacker_team, victim_team, g_TotalRounds + 1, phase);
         DbQuery(queryStr);
     }
 
@@ -320,8 +419,25 @@ public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast
     }
 }
 
+
+void AddMatchRoundDB(int winningTeam) {
+    char queryStr[512];
+    Format(queryStr, sizeof(queryStr),
+    "INSERT INTO match_round SET room_id='%s', phase='%d', winning_team='%d', current_round='%d'",
+    g_roomId, phase, winningTeam, g_TotalRounds + 1);
+    DbQuery(queryStr);
+}
+
+
+void DBDemo() {
+    char queryStr[512];
+    Format(queryStr, sizeof(queryStr),
+    "");
+    DbQuery(queryStr);
+}
+
 /**
-    玩家离开事件
+    玩家离开事件 不干活！！！
 **/
 public Action OnPlayerDisconnect(Event event, const char[] name, bool dontBroadcast)
 {
@@ -375,11 +491,14 @@ public Action CheckPlayerCountAfterDisconnect(Handle timer)
 void InitDb() {
     char error[255];
     db = SQL_DefConnect(error, sizeof(error));
- 
+    
     if (db == null)
     {
         PrintToServer("无法连接到数据库: %s", error);
-    } 
+    } else {
+        DbQuery("SET NAMES 'utf8mb4'");
+        DbQuery("SET time_zone = '+08:00'");
+    }
 }
 
 // 执行SQL语句
@@ -411,9 +530,10 @@ void InitCustomReloadMap(int second) {
 public Action ReloadMap(Handle timer, any value) {
     // PrintToChatAll("[系统] 比赛结束，5 秒后将重新开始新一场比赛。");
     g_remainingTime--;
-    if (g_remainingTime % 10 == 0) {
-        PrintToChatAll("倒计时剩余 %d 秒", g_remainingTime);
-    }
+    PrintToChatAll("倒计时剩余 %d 秒", g_remainingTime);
+    /* if (g_remainingTime % 10 == 0) {
+        
+    } */
      // 倒计时结束，重启服务器
     if (g_remainingTime <= 0) {
         PrintToChatAll("服务器重启中...");
@@ -464,8 +584,17 @@ void GivePlayerWeapon(int client, const char[] weapon) {
 }
 
 
+void showScoreBoard(int client) {
+    FakeClientCommand(client, "+showscores");
+}
+
+
 // 显示排行榜
 public Action Command_Rank(int client, int args) {
+    char cdk[64];
+    GetConVarString(g_Cvar_cdk, cdk, 64);
+    PrintToServer("cdk: %s", cdk);
+    showScoreBoard(client);
     if (IsValidClient(client)) {
         ShowRankMenu(client);
     }
